@@ -81,7 +81,8 @@ resize_: Callable = partial(resize, mode="constant", preserve_range=True, anti_a
 
 
 def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int, int],
-                  test_mode: bool = False) -> tuple[float, float, float]:
+                  test_mode: bool = False,
+                  gt_name: str = "GT.nii.gz") -> tuple[float, float, float]:
     id_path: Path = source_path / ("train" if not test_mode else "test") / id_
 
     ct_path: Path = (id_path / f"{id_}.nii.gz") if not test_mode else (source_path / "test" / f"{id_}.nii.gz")
@@ -95,7 +96,7 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
 
     gt: np.ndarray
     if not test_mode:
-        gt_path: Path = id_path / "GT.nii.gz"
+        gt_path: Path = id_path / gt_name
         gt_nib = nib.load(str(gt_path))
         # print(nib_obj.affine, gt_nib.affine)
         gt = np.asarray(gt_nib.dataobj)
@@ -180,7 +181,8 @@ def main(args: argparse.Namespace):
                                  dest_path=dest_mode,
                                  source_path=src_path,
                                  shape=tuple(args.shape),
-                                 test_mode=mode == 'test')
+                                 test_mode=mode == 'test',
+                                 gt_name=args.gt_name)
         resolutions: list[tuple[float, float, float]]
         iterator = tqdm_(split_ids)
         match args.process:
@@ -204,6 +206,8 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--source_dir', type=str, required=True)
     parser.add_argument('--dest_dir', type=str, required=True)
 
+    parser.add_argument('--gt_name', type=str, default="GT.nii.gz",
+                        help="Ground-truth filename inside each patient folder.")
     parser.add_argument('--shape', type=int, nargs="+", default=[256, 256])
     parser.add_argument('--retains', type=int, default=25, help="Number of retained patient for the validation data")
     parser.add_argument('--seed', type=int, default=0)
