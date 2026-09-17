@@ -137,7 +137,9 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
 
 
 def get_splits(src_path: Path, retains: int, fold: int) -> tuple[list[str], list[str], list[str]]:
-    ids: list[str] = sorted(map_(lambda p: p.name, (src_path / 'train').glob('*')))
+    # Glob the patients, not everything: a stray .DS_Store would otherwise be
+    # handed to slice_patient as a patient id and blow up mid-slicing.
+    ids: list[str] = sorted(map_(lambda p: p.name, (src_path / 'train').glob('Patient_*')))
     print(f"Founds {len(ids)} in the id list")
     print(ids[:10])
     assert len(ids) > retains

@@ -50,7 +50,7 @@ from utils import (Dcm,
                    dice_coef,
                    save_images)
 
-from losses import (CrossEntropy)
+from losses import (CrossEntropy, DiceLoss, CrossEntropyAndDice)
 
 datasets_params: dict[str, dict[str, Any]] = {}
 # K for the number of classes
@@ -79,8 +79,12 @@ def gt_transform(K, img):
 
 def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     # Networks and scheduler
-    gpu: bool = args.gpu and torch.cuda.is_available()
-    device = torch.device("cuda") if gpu else torch.device("cpu")
+    if args.gpu and torch.cuda.is_available():
+         device = torch.device("cuda")
+    elif args.gpu and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f">> Picked {device} to run experiments")
 
     K: int = datasets_params[args.dataset]['K']
@@ -129,12 +133,25 @@ def runTraining(args):
     net, optimizer, device, train_loader, val_loader, K = setup(args)
 
     if args.mode == "full":
-        loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
+        idk = list(range(K))
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
-        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
+        idk = [0, 1, 3, 4]  # Do not supervise the heart (class 2)
     else:
         raise ValueError(args.mode, args.dataset)
 
+    dice_idk = [k for k in idk if k != 0]
+
+    match args.loss:
+        case "ce":
+            loss_fn = CrossEntropy(idk=idk)
+        case "dice":
+            loss_fn = DiceLoss(idk=dice_idk, batch_dice=args.batch_dice)
+        case "ce+dice":
+            loss_fn = CrossEntropyAndDice(idk=idk, dice_idk=dice_idk,
+                                        alpha=1.0, beta=args.dice_weight,
+                                        batch_dice=args.batch_dice)
+        case _ as l:
+            raise ValueError(l)
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
     log_dice_tra: Tensor = torch.zeros((args.epochs, len(train_loader.dataset), K))
@@ -241,6 +258,12 @@ def main():
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 
+    parser.add_argument('--loss', default='ce', choices=['ce', 'dice', 'ce+dice'],
+                        help="Training objective. 'ce+dice' is nnU-Net's fixed choice.")
+    parser.add_argument('--dice_weight', default=1.0, type=float,
+                        help="Weight on the Dice term of 'ce+dice'.")
+    parser.add_argument('--batch_dice', action=argparse.BooleanOptionalAction, default=True,
+                        help="Pool Dice over the batch instead of scoring each slice alone.")
     parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--debug', action='store_true',
                         help="Keep only a fraction (10 samples) of the datasets, "

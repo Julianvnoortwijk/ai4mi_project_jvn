@@ -9,7 +9,7 @@ holds {0, 1, 2, 3}.  This writes GT_fixed.nii.gz with the intended encoding:
 
 Where a real GT2.nii.gz exists (Patient_07 only) it is copied verbatim.
 
-    python fix_label_encoding_minimal.py --source_dir data/segthor_part1
+    python fix_label_encoding.py --source_dir data/segthor_part1
 
 """
 

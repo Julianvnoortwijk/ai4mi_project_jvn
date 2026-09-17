@@ -8,6 +8,11 @@
     - [Setting up the environment](#setting-up-the-environment)
         - [Setting up the environment - Some troubleshooting for windows users](#setting-up-the-environment---some-troubleshooting-for-windows-users)
     - [Getting the data](#getting-the-data)
+    - [The merged aorta label](#the-merged-aorta-label)
+        - [Step 1 - reconstruct the split automatically](#step-1-reconstruct-the-split)
+        - [Step 2 - correct the rest by hand](#step-2-correct-the-rest-by-hand)
+        - [Step 3 - slice to png](#step-3-slice-to-png)
+        - [Step 4 - train on the corrected data](#step-4-train)
     - [Training a base network](#training-a-base-network)
     - [Viewing the results](#viewing-the-results)
         - [2D viewer](#2d-viewer)
@@ -144,6 +149,135 @@ $ python  slice_segthor.py --source_dir data/segthor_train --dest_dir data/SEGTH
          --shape 256 256 --retain 10
 $ mv data/SEGTHOR_tmp data/SEGTHOR
 ````
+
+<a id="the-merged-aorta-label"></a>
+### The merged aorta label
+
+Part 1 of the data shipped with the aorta folded into the esophagus label: every
+`GT.nii.gz` holds only `{0, 1, 2, 3}`, and a class-1 voxel means "esophagus **or**
+aorta". Only `Patient_07` has the intended five-class encoding, in `GT2.nii.gz`.
+
+Recovering the split takes three steps: reconstruct it automatically, fix the few
+slices the reconstruction gets wrong by hand, then slice the result to `.png`.
+
+
+<a id="step-1-reconstruct-the-split"></a>
+#### Step 1 - reconstruct the split automatically
+
+```
+$ python fix_label_encoding.py --source_dir data/segthor_part1
+```
+
+This writes `GT_fixed.nii.gz` beside each patient's `GT.nii.gz`. It separates the
+two organs by calibre: the largest disk that fits inside the aorta is 10-14 mm in
+plane, the esophagus 4-10 mm. Against `Patient_07`'s real `GT2.nii.gz` it scores
+esophagus DSC 0.9982 and aorta DSC 0.9995, and it is flat for any `--r_aorta`
+between 6 and 11 mm. Patients 02, 03, 06, 09 and 16 were scanned with contrast
+(aorta 137-209 HU against an esophagus at 31-51 HU), so an intensity threshold
+gives five further, fully independent references; agreement there is DSC
+0.995-1.000.
+
+It is still a reconstruction, and wherever it is wrong those errors become the
+labels the network trains on. In practice it fails on a handful of slices per
+patient, in predictable places: the ends of the aorta tube, and slices where the
+two organs touch and merge into a single blob.
+
+<a id="step-2-correct-the-rest-by-hand"></a>
+#### Step 2 - correct the rest by hand
+
+NOTE: corrections.py already contains the corrections, so running 
+this is not necessary and may erase the corrections --> needs fix
+
+```
+$ python relabel_gui.py --source_dir data/segthor_part1
+```
+
+This opens a browser tool at `http://localhost:8000` for stepping through the
+slices. It is easy to tell the two apart by eye: the descending aorta is the big
+round vessel just left of the spine, the esophagus the smaller, squashier one in
+front of it. Three tools, all of which only ever move voxels between the esophagus
+and the aorta:
+
+* **Whole blob** - click a blob to relabel all of it. This is the common case: the
+  reconstruction hands an entire tube cross-section to the wrong organ.
+* **Brush** - drag to paint individual voxels, size on a slider or `[` / `]`.
+* **Lasso** - draw a loop, everything inside takes the current label. Use this
+  where the *border* between two touching tubes sits in the wrong place.
+
+Plus whole-slice buttons (swap the two, all aorta, all esophagus), `Undo`, and a
+**worth a look** list that jumps to the slices most likely to be wrong, with the
+reason. That list keeps the review to a couple of dozen slices per patient rather
+than all 130. Keys: arrows for slices, `1` `2` `3` for the labels, `b` for the next
+tool, `s` swap, `u` undo.
+
+**Pressing Save writes your decisions to `corrections.py`** - a plain dict of
+patient, slice range and action, so the manual pass is a readable, re-runnable part
+of the pipeline rather than an undocumented step:
+
+```python
+CORRECTIONS: dict[str, list[tuple]] = {
+    "Patient_14": [
+        ("93", "esophagus", (262, 297)),   # one blob, named wrong
+        ("109-119", "esophagus"),          # whole slice
+    ],
+}
+```
+
+Any freehand brush or lasso voxels go to `corrections_paint.npz` alongside it,
+since a voxel set cannot be written as a readable slice-and-action line. Nothing is
+written until you press Save. You can also edit `corrections.py` by hand - the
+actions are `aorta`, `esophagus`, `swap`, `ambiguous` and `drop`, and the file's
+docstring documents them.
+
+Then apply them. Check first, look at the pictures, and only then write:
+
+```
+$ python apply_corrections.py --source_dir data/segthor_part1 --dry_run
+$ python apply_corrections.py --source_dir data/segthor_part1 --preview qc/
+```
+
+That writes `GT_corrected.nii.gz` per patient and drops a three-panel picture (CT,
+before, after) for every slice it touched into `qc/`. Flipping through those is the
+cheapest check that a click landed where you meant it.
+
+Both scripts assert before saving that only esophagus and aorta voxels moved, so a
+wrong entry can make the split worse but cannot touch the heart, the trachea, or
+which voxels are foreground at all.
+
+
+<a id="step-3-slice-to-png"></a>
+#### Step 3 - slice to `.png`
+
+```
+$ rm -rf data/SEGTHOR_tmp data/SEGTHOR
+$ python slice_segthor.py --source_dir data/segthor_part1 --dest_dir data/SEGTHOR_tmp \
+      --gt_name GT_corrected.nii.gz --shape 256 256 --retain 5 -p -1
+$ mv data/SEGTHOR_tmp data/SEGTHOR
+```
+
+Note that `make data/SEGTHOR` slices `GT_fixed.nii.gz`, the *uncorrected*
+reconstruction, so use the command above once you have `GT_corrected.nii.gz` — or
+point the recipe at the corrected file. The `--retain 5` split is drawn with a
+fixed seed, so the same command always produces the same train/val division.
+
+
+<a id="step-4-train"></a>
+#### Step 4 - train on the corrected data
+
+```
+$ python -O main.py --dataset SEGTHOR --mode full --epochs 25 \
+      --dest results/segthor_corrected/ce --gpu
+```
+
+Ordinary cross-entropy over the five classes. Drop `-O` for the first epoch or two
+if you want the sanity assertions checked, and drop `--gpu` to run on the CPU.
+
+One caveat when reading the numbers: `dice_val.npy` averages over every slice,
+including the many that contain none of the organ at all. Those score close to 1.0
+through the smoothing term, so the per-class means come out higher than the model
+deserves — on one run the heart read 0.898 where the figure over organ-bearing
+slices only was 0.680. Compare runs against each other freely, but restrict to the
+slices where a class is present before quoting an absolute DSC.
 
 <a id="training-a-base-network"></a>
 ### Training a base network

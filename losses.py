@@ -23,7 +23,7 @@
 # SOFTWARE.
 
 
-from torch import einsum
+from torch import Tensor, einsum
 
 from utils import simplex, sset
 
@@ -51,3 +51,44 @@ class CrossEntropy():
 class PartialCrossEntropy(CrossEntropy):
     def __init__(self, **kwargs):
         super().__init__(idk=[1], **kwargs)
+
+
+class DiceLoss():
+    def __init__(self, **kwargs):
+        self.idk = kwargs['idk']
+        self.smooth: float = kwargs.get('smooth', 1e-8)
+        self.batch_dice: bool = kwargs.get('batch_dice', True)
+        print(f"Initialized {self.__class__.__name__} with {kwargs}")
+
+    def __call__(self, pred_softmax, weak_target):
+        assert pred_softmax.shape == weak_target.shape
+        assert simplex(pred_softmax)
+        assert sset(weak_target, [0, 1])
+
+        pred = pred_softmax[:, self.idk, ...]
+        mask = weak_target[:, self.idk, ...].float()
+
+        sum_str: str = "bkwh->k" if self.batch_dice else "bkwh->bk"
+        inter = einsum(f"bkwh,{sum_str}", pred, mask)
+        union = einsum(sum_str, pred) + einsum(sum_str, mask)
+
+        dices = (2 * inter + self.smooth) / (union + self.smooth)
+
+        return 1 - dices.mean()
+    
+
+class CrossEntropyAndDice():
+    def __init__(self, **kwargs):
+        self.idk = kwargs['idk']
+        self.alpha: float = kwargs.get('alpha', 1.0)
+        self.beta: float = kwargs.get('beta', 1.0)
+
+        self.ce = CrossEntropy(idk=self.idk)
+        self.dice = DiceLoss(idk=kwargs.get('dice_idk', self.idk),
+                             smooth=kwargs.get('smooth', 1e-8),
+                             batch_dice=kwargs.get('batch_dice', True))
+        print(f"Initialized {self.__class__.__name__} with alpha={self.alpha} beta={self.beta}")
+
+    def __call__(self, pred_softmax, weak_target):
+        return (self.alpha * self.ce(pred_softmax, weak_target)
+                + self.beta * self.dice(pred_softmax, weak_target))
